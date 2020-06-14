@@ -1,0 +1,709 @@
+---
+title: "Détéction des jeunes skieurs"
+author: "Modèle multi-états"
+date: "02/04/2020"
+output: 
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE,fig.width=12,message = FALSE)
+library(stringr)
+library(lubridate)
+library(forcats)
+library(reshape2)
+library(mstate)
+library(data.table)
+library(lubridate)
+library(ggplot2)
+library(igraph)
+library(mvna)
+library(plotly)
+```
+
+```{r data, include=FALSE,cache=TRUE}
+nb_states=10
+####Importation FFS####
+resultats_FFS_national=read.csv2("U:/Ski/IMPORTATION_BDD/rstudio-export/resultats_nat.csv",encoding = "latin1")
+resultats_FFS_national=resultats_FFS_national[!is.na(resultats_FFS_national$Pts),]
+resultats_FFS_regional=read.csv2("U:/Ski/IMPORTATION_BDD/rstudio-export/resultats_reg.csv",encoding = "latin1")
+resultats_FFS_regional=resultats_FFS_regional[!is.na(resultats_FFS_regional$Pts),]
+resultats_FFS=data.frame(rbind(resultats_FFS_national,resultats_FFS_regional),circuit="FFS",Nat="FRA")
+resultats_FFS$ID=resultats_FFS$Code
+resultats_FFS$Pts=as.numeric(as.character(resultats_FFS$Pts))
+
+resultats_FFS_fis=read.csv2("U:/Ski/IMPORTATION_BDD/rstudio-export/resultats_fis.csv",encoding = "latin1")
+resultats_FFS_fis=resultats_FFS_fis[!is.na(resultats_FFS_fis$Pts),]
+
+resultats_FFS_fis$ID=as.factor(resultats_FFS$Code[match(paste(resultats_FFS_fis$Club,gsub(" ","",gsub("-","",tolower(resultats_FFS_fis$Nom_prenom)))),paste(resultats_FFS$Club,gsub(" ","",gsub("-","",tolower(resultats_FFS$Nom_prenom)))))])
+
+resultats_FFS_fis$Pts=as.numeric(as.character(resultats_FFS_fis$Pts))
+
+resultats_TOT=rbind(resultats_FFS,
+              data.frame(resultats_FFS_fis,circuit="FIS"))
+licence=read.csv2("U:/Ski/IMPORTATION_BDD/licence2.csv")
+
+
+
+resultats_TOT$date_naiss=as.Date(substr(licence$info1,4,14),format = "%d/%m/%Y")[match(resultats_TOT$ID,paste("FFS",licence$numero,sep=""))]
+resultats_TOT$mois_naiss=month(resultats_TOT$date_naiss)
+resultats_TOT$mois_naiss[is.na(resultats_TOT$mois_naiss)]="inconnu"
+resultats_TOT$date=as.Date(resultats_TOT$date,"%d/%m/%Y")
+resultats_TOT$age_exact=time_length(difftime(resultats_TOT$date,resultats_TOT$date_naiss),"years")
+
+
+
+resultats_TOT$trimestre[as.numeric(resultats_TOT$mois_naiss)<4]="1er trimestre"
+resultats_TOT$trimestre[as.numeric(resultats_TOT$mois_naiss)>=4 & as.numeric(as.character(resultats_TOT$mois_naiss))<7]="2e trimestre"
+resultats_TOT$trimestre[as.numeric(resultats_TOT$mois_naiss)>=7 & as.numeric(as.character(resultats_TOT$mois_naiss))<10]="3e trimestre"
+resultats_TOT$trimestre[as.numeric(resultats_TOT$mois_naiss)>=10]="4e trimestre"
+resultats_TOT$trimestre[is.na(resultats_TOT$trimestre)]="inconnu"
+resultats_TOT$mois_naiss=fct_recode(as.factor(resultats_TOT$mois_naiss),
+                                    "Janvier" ="1",
+                                    "Fevrier" ="2",
+                                    "Mars" ="3",
+                                    "Avril" ="4",
+                                    "Mai" ="5",
+                                    "Juin" ="6",
+                                    "Juillet" ="7",
+                                    "Aout" ="8",
+                                    "Septembre" ="9",
+                                    "Octobre" ="10",
+                                    "Novembre" ="11",
+                                    "Decembre" ="12")
+resultats_TOT$mois_naiss <- factor(resultats_TOT$mois_naiss, levels = c("Janvier","Fevrier","Mars","Avril","Mai","Juin", "Juillet","Aout","Septembre","Octobre","Novembre","Decembre"))
+resultats_TOT$sex[str_detect(resultats_TOT$discipline.sex,"Dames")]="Femme"
+resultats_TOT$sex[str_detect(resultats_TOT$discipline.sex,"Homme")]="Homme"
+resultats_TOT$sex[str_detect(resultats_TOT$discipline.sex,"Mixte")]="Mixte"
+resultats_TOT$dis=""
+resultats_TOT$dis[str_detect(resultats_TOT$discipline.sex,"GS")]="GS"
+resultats_TOT$dis[str_detect(resultats_TOT$discipline.sex,"CR")]="CR"
+resultats_TOT$dis[str_detect(resultats_TOT$discipline.sex,"SC")]="SC"
+resultats_TOT$dis[str_detect(resultats_TOT$discipline.sex,"DH")]="DH"
+resultats_TOT$dis[str_detect(resultats_TOT$discipline.sex,"SL")]="SL"
+resultats_TOT$dis[str_detect(resultats_TOT$discipline.sex,"SG")]="SG"
+
+#write.table(resultats_TOT,"U:/Ski/IMPORTATION_BDD/resultats_TOT.csv",sep=";",row.names = FALSE)
+
+
+
+load("U:/Ski/markov/MEtats.RData")
+
+cum_hazard=data.frame(rbindlist(summary(dli.mvna),idcol = "trans"))
+cum_hazard$depart=factor(unlist(lapply(str_split(cum_hazard$trans," "),function(x){x[1]})),levels=c(1:10))
+cum_hazard$fin=factor(unlist(lapply(str_split(cum_hazard$trans," "),function(x){x[2]})),levels=c(1:10))
+
+prob_trans10=data.frame()
+for (j in 1:nb_states){
+  print(j)
+  
+  dd = cbind(melt(pt10for[[j]][,c(1:(nb_states+1))], id=c("time")),
+             melt(pt10for[[j]][,c(1,(nb_states+2):(nb_states*2+1))], id=c("time"))[,-1])
+  
+  for (i in 1:nb_states){
+    dd$state[str_detect(dd$variable,as.character(i))]=i}
+  
+  names(dd)=c("time","variable","proba","variable2","se","state")
+  dd$state=factor(dd$state,levels=c(1:nb_states))
+  dd$statestart=j
+  prob_trans10=rbind(prob_trans10,dd)
+}
+prob_trans10$statestart=factor(prob_trans10$statestart,levels=c(1:nb_states))
+prob_trans10=prob_trans10[-which(prob_trans10$time>25),]
+
+
+prob_trans15=data.frame()
+for (j in 1:nb_states){
+  print(j)
+  
+  dd = cbind(melt(pt15for[[j]][,c(1:(nb_states+1))], id=c("time")),
+             melt(pt15for[[j]][,c(1,(nb_states+2):(nb_states*2+1))], id=c("time"))[,-1])
+  
+  for (i in 1:nb_states){
+    dd$state[str_detect(dd$variable,as.character(i))]=i}
+  
+  names(dd)=c("time","variable","proba","variable2","se","state")
+  dd$state=factor(dd$state,levels=c(1:nb_states))
+  dd$statestart=j
+  prob_trans15=rbind(prob_trans15,dd)
+}
+prob_trans15$statestart=factor(prob_trans15$statestart,levels=c(1:nb_states))
+prob_trans15=prob_trans15[-which(prob_trans15$time>25),]
+
+prob_trans20=data.frame()
+for (j in 1:nb_states){
+  print(j)
+  
+  dd = cbind(melt(pt20for[[j]][,c(1:(nb_states+1))], id=c("time")),
+             melt(pt20for[[j]][,c(1,(nb_states+2):(nb_states*2+1))], id=c("time"))[,-1])
+  
+  for (i in 1:nb_states){
+    dd$state[str_detect(dd$variable,as.character(i))]=i}
+  
+  names(dd)=c("time","variable","proba","variable2","se","state")
+  dd$state=factor(dd$state,levels=c(1:nb_states))
+  dd$statestart=j
+  prob_trans20=rbind(prob_trans20,dd)
+}
+prob_trans20$statestart=factor(prob_trans20$statestart,levels=c(1:nb_states))
+prob_trans20=prob_trans20[-which(prob_trans20$time>25),]
+
+
+
+
+names(pt25fix)[1:nb_states]=1:nb_states
+allprob=data.frame(rbindlist(pt25fix[1:nb_states],idcol = "depart"))
+allprob$depart=factor(allprob$depart,levels=1:nb_states)
+```
+
+# Contexte
+
+Pour l'exemple j'ai réalisé les analyses sur la discipline Slalom Géant (GS) masculin.
+
+## Couloir de performance
+
+Le niveau de performance a été catégorisé avec les couloirs de performances.
+Pour l'exemple j'ai choisi 10 couloirs de performances d'effectifs égaux par âge mais cela peut être adapté. On peut même choisir un autre critère de performance (catégoriser les points FFS, classement, ...)
+
+```{r , cache=TRUE}
+x1=aggregate(Pts~age_exact+age+ID ,data=resultats_TOT[which(resultats_TOT$dis=="GS" & resultats_TOT$sex=="Homme"),],FUN=min)
+
+x2=aggregate(Pts~age+ID ,data=resultats_TOT[which(resultats_TOT$dis=="GS" & resultats_TOT$sex=="Homme" & !is.na(resultats_TOT$age_exact)),],FUN=min)
+
+age=names(table(x2$age))
+q=data.frame()
+decoupage=seq(0,1,0.1)
+nb_states=length(decoupage)-1
+
+for(i in 1:length(age)){
+  q=rbind(q,quantile(x2$Pts[x2$age==age[i]], probs = decoupage))
+}
+q$age=as.numeric(age)
+names(q)=c(1:(length(decoupage)),"age")
+
+q=melt(q,id="age")
+
+couloir=unique(sort(q$variable))[-length(unique(sort(q$variable)))]
+age=unique(sort(q$age))
+for (i in 1:length(couloir)){
+  for (j in 1:length(age)){
+    q$value2[q$age==age[j] & q$variable==couloir[i]]=q$value[q$age==age[j] & q$variable==i+1]
+  }
+  q$values[q$variable==couloir[i]]=predict(loess(value~age,data=q[q$variable==couloir[i],],span = 0.2))
+  q$value2s[q$variable==couloir[i]]=predict(loess(value2~age,data=q[q$variable==couloir[i],],span = 0.2))
+}
+
+```
+
+```{r }
+ggplot(q[-which(q$variable==10),])+geom_ribbon(aes(x=age,ymin=values,ymax=value2s,fill=variable),alpha=0.5)+
+  geom_line(aes(x=age,y=values,col=variable))+
+  theme_minimal()+ scale_fill_viridis_d()+scale_color_viridis_d()+xlim(c(10,50))+ylim(c(0,500))
+```
+
+## Objectif
+
+- Modéliser les transitions entre les différents couloirs
+
+```{r graph, echo=FALSE,fig.width=15,fig.height=15}
+tra2 <- matrix(1, nb_states, nb_states, dimnames = list(c(1:nb_states),c(1:nb_states)),byrow = TRUE)
+net <- graph_from_adjacency_matrix(tra2)
+plot(net,vertex.label.cex=6,edge.width=2.5)
+```
+
+- Estimer les probabilités de performances individuelles futures (en couloirs de performance) d'un instant $s$ à un instant $t$ selon son niveau actuel.
+
+<center>
+$P_{gh}(s, t) = P(X(t) = h|X(s) = g)$
+
+$g$ : couloir à l'instant $s$
+
+$h$ : couloir à l'instant $t$
+</center>
+
+
+- Modèle reposant sur la propriété de Markov (l'ensemble de l'information qui va être utilisée pour prédire le futur est comprise dans l'état présent)
+
+- Modèle inhomogène en temps (les probabilités de transitions changent au cours du temps)
+
+- Les individus rentrent dans la cohorte au moment de leur première performance (troncature à gauche)
+
+- Les individus sont censurés au moment de leur dernière performance (censure à droite)
+
+## Problématique
+
+Comment estimer ces probabilités de transitions ?
+
+# Méthodologie
+
+## Estimation des intensités cumulées de transitions (ou fonctions de risque) {.tabset}
+
+- Estimateur de Nelson-Aalen
+
+<center>
+$\widehat{A}_{gh}(t) = \sum_{t_i\leq t} \frac{dN_{gh}(t_i)}{Y_g(t_i)}$
+
+avec $dN_{gh}(t_i)$ le nombre de transition entre le couloir $g$ et $h$ au temps $t_i$
+
+et $Y_g(t_i)$ le nombre de personne présente dans le couloir $g$ juste avant le temps $t_i$
+</center>
+
+Ces fonctions permettront de calculer par la suite les probabilités de transitions entre les couloirs de performance
+
+```{r hasard, echo=FALSE,cache=TRUE}
+plot_IT=list()
+cum_hazard$hasard=cum_hazard$na
+for (i in 1:10){
+  plot_IT[[i]]=ggplotly(ggplot(cum_hazard[cum_hazard$depart==i,],aes(x=time,y=hasard,col=fin))+geom_line()+theme_minimal()+ scale_color_viridis_d())%>% layout(yaxis = list(title="Intensité de transition"),title=paste("Etat de départ",i))
+}
+```
+
+### En partant du couloir 1
+```{r, echo=FALSE}
+plot_IT[[1]]
+```
+
+### En partant du couloir 2
+```{r, echo=FALSE}
+plot_IT[[2]]
+```
+
+### En partant du couloir 3
+```{r, echo=FALSE}
+plot_IT[[3]]
+```
+
+### En partant du couloir 4
+```{r, echo=FALSE}
+plot_IT[[4]]
+```
+
+### En partant du couloir 5
+```{r, echo=FALSE}
+plot_IT[[5]]
+```
+
+### En partant du couloir 6
+```{r, echo=FALSE}
+plot_IT[[6]]
+```
+
+### En partant du couloir 7
+```{r, echo=FALSE}
+plot_IT[[7]]
+```
+
+### En partant du couloir 8
+```{r, echo=FALSE}
+plot_IT[[8]]
+```
+
+### En partant du couloir 9
+```{r, echo=FALSE}
+plot_IT[[9]]
+```
+
+### En partant du couloir 10
+```{r, echo=FALSE}
+plot_IT[[10]]
+```
+
+
+
+
+
+# Résultats
+
+## Calcul des probabilités de transition
+
+On peut calculer les probabilités de transitions à partir des intensités de transitions
+
+<center>
+$\widehat{P}_{g h}(s, t) = \prod_{s<t_k\leq t} (I + \widehat{A}(t_k))$
+</center>
+
+
+Exemple d'interprétation pour le couloir 1 :
+
+Si l'on choisi de partir du couloir 1 (premier onglet), la courbe violette représente la probabilité d'être au couloir 1 à l'âge $t$ (en abscisse). Ainsi, à 10 ans la probabilité d'être dans le couloir 1 est de 100% (logique on a estimé qu'on partait de la), puis diminue au fur et à mesure. L'ensemble des autres courbes s'interprêtent de la même manière mais représentent la probabilité d'être dans les autres couloirs à chaque âge $t$ (chaque courbe représente la probabilité d'être dans un couloir).
+
+Le graphique de droite s'interprète de la même manière mais les probabilités ont été sommés (car la somme des probabilités sont égales à 1). La distance entre deux courbes adjacentes représente la probabilité d'être dans l'état correspondant sachant que l'on est au couloir 1 à 10 ans (si l'on choisi de partir du couloir 1).
+
+Les différents onglets permettent de voir comment ces probabilités évoluent selon le couloir de départ
+
+## On fixe l'âge de départ à 10 ans {.tabset}
+
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+plot_PTf=list()
+
+
+for (i in 1:10){
+  plot_PTf[[i]]=list()
+  plot_PTf[[i]][[1]]=ggplotly(ggplot(prob_trans10[prob_trans10$statestart==i,],aes(x=time,y=proba,col=state, text = paste("Probabilité :",round(proba,2),"%"),group=1))+geom_line()+ scale_color_viridis_d()+theme_minimal()+
+  geom_ribbon(aes(ymin = proba-se, ymax = proba+se,fill=state),alpha=0.2,group=1),tooltip=c("time","state","text"))%>% layout(yaxis = list(title="Probabilité de transition"),title=paste("Etat de départ",i))
+
+  plot_PTf[[i]][[2]]=ggplotly(ggplot(prob_trans10[prob_trans10$statestart==i,],aes(x=time,y=proba,fill=state, text = paste("Probabilité :",round(proba,2),"%")))+geom_area(group=1)+ scale_fill_viridis_d()+theme_minimal(),tooltip=c("time","state","text"))%>% layout(yaxis = list(title="Probabilité de transition"),title=paste("Etat de départ",i))
+}
+```
+
+
+On souhaite estimer
+
+<center>
+$P_{gh}(10, t)$
+</center>
+
+### A partir du couloir 1
+<center>
+$P_{1h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[1]][[1]],plot_PTf[[1]][[2]])
+```
+
+### A partir du couloir 2
+<center>
+$P_{2h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[2]][[1]],plot_PTf[[2]][[2]])
+```
+
+### A partir du couloir 3
+<center>
+$P_{3h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[3]][[1]],plot_PTf[[3]][[2]])
+```
+
+### A partir du couloir 4
+<center>
+$P_{4h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[4]][[1]],plot_PTf[[4]][[2]])
+```
+
+### A partir du couloir 5
+<center>
+$P_{5h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[5]][[1]],plot_PTf[[5]][[2]])
+```
+
+### A partir du couloir 6
+<center>
+$P_{6h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[6]][[1]],plot_PTf[[6]][[2]])
+```
+
+### A partir du couloir 7
+<center>
+$P_{7h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[7]][[1]],plot_PTf[[7]][[2]])
+```
+
+### A partir du couloir 8
+<center>
+$P_{8h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[8]][[1]],plot_PTf[[8]][[2]])
+```
+
+### A partir du couloir 9
+<center>
+$P_{9h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[9]][[1]],plot_PTf[[9]][[2]])
+```
+
+### A partir du couloir 10
+<center>
+$P_{10h}(10, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf[[10]][[1]],plot_PTf[[10]][[2]])
+```
+
+On remarque que quelque soit le couloir à l'âge de 10 ans, la probabilité du couloir à l'âge adulte varie très peu
+
+## On fixe l'âge de départ à 15 ans {.tabset}
+
+Ici on ne part plus le niveau de performance à 10 ans mais à 15 ans.
+
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+plot_PTf15=list()
+
+
+for (i in 1:10){
+  plot_PTf15[[i]]=list()
+  plot_PTf15[[i]][[1]]=ggplotly(ggplot(prob_trans15[prob_trans15$statestart==i,],aes(x=time,y=proba,col=state, text = paste("Probabilité :",round(proba,2),"%"),group=1))+geom_line()+ scale_color_viridis_d()+theme_minimal()+
+  geom_ribbon(aes(ymin = proba-se, ymax = proba+se,fill=state),alpha=0.2),tooltip=c("time","state","text"))%>% layout(yaxis = list(title="Probabilité de transition"),title=paste("Etat de départ",i))
+
+  plot_PTf15[[i]][[2]]=ggplotly(ggplot(prob_trans15[prob_trans15$statestart==i,],aes(x=time,y=proba,fill=state, text = paste("Probabilité :",round(proba,2),"%")))+geom_area(group=1)+ scale_fill_viridis_d()+theme_minimal(),tooltip=c("time","state","text"))%>% layout(yaxis = list(title="Probabilité de transition"),title=paste("Etat de départ",i))
+}
+```
+
+
+On souhaite donc estimer
+<center>
+$P_{gh}(15, t)$
+</center>
+
+Les graphiques s'interpretent de la même manière que ceux précédents mais on part maintenant de 15 ans.
+
+### A partir du couloir 1
+<center>
+$P_{1h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[1]][[1]],plot_PTf15[[1]][[2]])
+```
+
+### A partir du couloir 2
+<center>
+$P_{2h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[2]][[1]],plot_PTf15[[2]][[2]])
+```
+
+### A partir du couloir 3
+<center>
+$P_{3h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[3]][[1]],plot_PTf15[[3]][[2]])
+```
+
+### A partir du couloir 4
+<center>
+$P_{4h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[4]][[1]],plot_PTf15[[4]][[2]])
+```
+
+### A partir du couloir 5
+<center>
+$P_{5h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[5]][[1]],plot_PTf15[[5]][[2]])
+```
+
+### A partir du couloir 6
+<center>
+$P_{6h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[6]][[1]],plot_PTf15[[6]][[2]])
+```
+
+### A partir du couloir 7
+<center>
+$P_{7h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[7]][[1]],plot_PTf15[[7]][[2]])
+```
+
+### A partir du couloir 8
+<center>
+$P_{8h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[8]][[1]],plot_PTf15[[8]][[2]])
+```
+
+### A partir du couloir 9
+<center>
+$P_{9h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[9]][[1]],plot_PTf15[[9]][[2]])
+```
+
+### A partir du couloir 10
+<center>
+$P_{10h}(15, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf15[[10]][[1]],plot_PTf15[[10]][[2]])
+```
+
+On remarque que le couloir à l'âge de 15 ans est un peu plus determinante pour prédire le couloir à l'âge adulte.
+
+## On fixe l'âge de départ à 20 ans {.tabset}
+
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+plot_PTf20=list()
+
+
+
+for (i in 1:10){
+  plot_PTf20[[i]]=list()
+  plot_PTf20[[i]][[1]]=ggplotly(ggplot(prob_trans20[prob_trans20$statestart==i,],aes(x=time,y=proba,col=state, text = paste("Probabilité :",round(proba,2),"%"),group=1))+geom_line()+ scale_color_viridis_d()+theme_minimal()+
+  geom_ribbon(aes(ymin = proba-se, ymax = proba+se,fill=state),alpha=0.2),title=paste("Etat de départ",i),tooltip=c("time","state","text"))%>% layout(yaxis = list(title="Probabilité de transition"))
+
+  plot_PTf20[[i]][[2]]=ggplotly(ggplot(prob_trans20[prob_trans20$statestart==i,],aes(x=time,y=proba,fill=state, text = paste("Probabilité :",round(proba,2),"%")))+geom_area(group=1)+ scale_fill_viridis_d()+theme_minimal(),tooltip=c("time","state","text"))%>% layout(yaxis = list(title="Probabilité de transition"),title=paste("Etat de départ",i))
+}
+```
+
+
+On souhaite estimer
+<center>
+$P_{gh}(20, t)$
+</center>
+
+### A partir du couloir 1
+
+<center>
+$P_{1h}(20, t)$
+</center>
+
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[1]][[1]],plot_PTf20[[1]][[2]])
+```
+
+### A partir du couloir 2
+<center>
+$P_{2h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[2]][[1]],plot_PTf20[[2]][[2]])
+```
+
+### A partir du couloir 3
+<center>
+$P_{3h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[3]][[1]],plot_PTf20[[3]][[2]])
+```
+
+### A partir du couloir 4
+<center>
+$P_{4h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[4]][[1]],plot_PTf20[[4]][[2]])
+```
+
+### A partir du couloir 5
+<center>
+$P_{5h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[5]][[1]],plot_PTf20[[5]][[2]])
+```
+
+### A partir du couloir 6
+<center>
+$P_{6h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[6]][[1]],plot_PTf20[[6]][[2]])
+```
+
+### A partir du couloir 7
+<center>
+$P_{7h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[7]][[1]],plot_PTf20[[7]][[2]])
+```
+
+### A partir du couloir 8
+<center>
+$P_{8h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[8]][[1]],plot_PTf20[[8]][[2]])
+```
+
+### A partir du couloir 9
+<center>
+$P_{9h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[9]][[1]],plot_PTf20[[9]][[2]])
+```
+
+### A partir du couloir 10
+<center>
+$P_{10h}(20, t)$
+</center>
+```{r , echo=FALSE,cache=TRUE,fig.width=12}
+subplot(plot_PTf20[[10]][[1]],plot_PTf20[[10]][[2]])
+```
+
+
+## En fixant l'etat final {.tabset}
+
+Maintenant on peut aussi fixer l'état final (ici à 23 ans).
+Cela signifique que l'on va fixer le l'état $h$ :
+<center>
+$P_{gh}(s, 23)$
+</center>
+
+On cherche donc à voir comment évoluent les probabilités d'être dans un couloir de performance $h$  à 25 ans selon son état $g$ à l'instant $s$
+
+
+
+
+```{r fixed1, echo=FALSE,cache=TRUE,fig.width=12}
+names(pt25fix)[1:nb_states]=1:nb_states
+allprob=data.frame(rbindlist(pt25fix[1:nb_states],idcol = "depart"))
+allprob$depart=factor(allprob$depart,levels=1:nb_states)
+allprob=allprob[allprob$time>10,]
+```
+
+Exemple d'interprétation :
+Si l'on fixe le couloir 1 à 23 ans (premier onglet), les courbes representent la probabilité d'être au couloir 1 à 23 ans si l'on est dans l'état correspondant à la courbe à l'âge $s$. La courbe violette est donc la probabilité de FINIR au couloir 1 à 23 ans si l'on est au couloir 1 à l'âge $t$ (en abscisse). Ainsi, à 10 ans la probabilité de finir au couloir 1 est sensiblement la même quel que soit le niveau à cet âge (une tendance mais très legère). Puis au fur et à mesure des âges, le fait d'être dans le premier couloir augmente les chances de finir au premier couloir à 23 ans. A 20 ans par exemple, si l'on est au couloir 1, on a 46% de chance d'être au couloir 1 à 23 ans. Par contre, si on est au couloir 2 on a plus que 5% de chance.
+
+### En fixant le couloir final 1 à 23 ans
+<center>
+$P_{g1}(s, 23)$
+</center>
+
+```{r fixed2, echo=FALSE,cache=TRUE,fig.width=12}
+ggplotly(ggplot(allprob)+
+  geom_line(aes(x=time,y=pstate1,col=depart, text = paste("Probabilité :",round(pstate1,2),"%"),group = 1),size=0.8)+
+  geom_ribbon(aes(x=time,ymin = pstate1-se1, ymax = pstate1+se1,fill=depart),alpha=0.2)+theme_minimal()+scale_color_viridis_d(),tooltip = c("time","depart","text"))
+```
+
+### En fixant le couloir final 2 à 23 ans
+<center>
+$P_{g2}(s, 23)$
+</center>
+
+```{r fixed3, echo=FALSE,cache=TRUE,fig.width=12}
+ggplotly(ggplot(allprob)+
+  geom_line(aes(x=time,y=pstate2,col=depart, text = paste("Probabilité :",round(pstate1,2),"%"),group = 1),size=0.8)+
+  geom_ribbon(aes(x=time,ymin = pstate2-se1, ymax = pstate2+se1,fill=depart),alpha=0.2)+theme_minimal()+scale_color_viridis_d(),tooltip = c("time","depart","text"))
+```
+
+### En fixant le couloir final 3 à 23 ans
+<center>
+$P_{g3}(s, 23)$
+</center>
+
+```{r fixed4, echo=FALSE,cache=TRUE,fig.width=12}
+ggplotly(ggplot(allprob)+
+  geom_line(aes(x=time,y=pstate3,col=depart, text = paste("Probabilité :",round(pstate1,2),"%"),group = 1),size=0.8)+
+  geom_ribbon(aes(x=time,ymin = pstate3-se1, ymax = pstate3+se1,fill=depart),alpha=0.2)+theme_minimal()+scale_color_viridis_d(),tooltip = c("time","depart","text"))
+```
+
+
